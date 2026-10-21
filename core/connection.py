@@ -8,55 +8,16 @@ from pymavlink import mavutil
 
 try:
     from . import config
+    from .telemetry import Telemetry, wait_for_vehicle_heartbeat
 except ImportError:  # Allow ``python core/connection.py`` from the project root.
     import config  # type: ignore[no-redef]
+    from telemetry import Telemetry, wait_for_vehicle_heartbeat  # type: ignore[no-redef]
 
 
 def wait_for_heartbeat(master, timeout):
-    """Wait for an autopilot heartbeat and return the received message.
+    """Wait for and identify the vehicle heartbeat on a new link."""
 
-    GCS heartbeats are ignored because they do not identify the vehicle TriOS
-    needs to control.  A timeout is reported explicitly as a connection error.
-    """
-
-    deadline = time.monotonic() + timeout
-    gcs_type = mavutil.mavlink.MAV_TYPE_GCS
-
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError(
-                f"No autopilot heartbeat received within {timeout} seconds"
-            )
-
-        heartbeat = master.recv_match(
-            type="HEARTBEAT", blocking=True, timeout=remaining
-        )
-        if heartbeat is None:
-            raise TimeoutError(
-                f"No autopilot heartbeat received within {timeout} seconds"
-            )
-
-        if getattr(heartbeat, "type", None) == gcs_type:
-            continue
-
-        source_system = heartbeat.get_srcSystem()
-        source_component = heartbeat.get_srcComponent()
-        if not (1 <= source_system <= 255 and 1 <= source_component <= 255):
-            raise ValueError(
-                "Received an autopilot heartbeat with invalid target IDs: "
-                f"system={source_system}, component={source_component}"
-            )
-
-        # recv_match normally sets these through pymavlink's message handler;
-        # assign them explicitly so the contract remains true for every link.
-        master.target_system = source_system
-        master.target_component = source_component
-        print(
-            "Connected to autopilot "
-            f"system {master.target_system}, component {master.target_component}"
-        )
-        return heartbeat
+    return wait_for_vehicle_heartbeat(master, timeout)
 
 
 def connect(connection_string, timeout):
@@ -85,20 +46,19 @@ def _print_heartbeats(master, duration=5):
     """Print vehicle mode and armed state for a short diagnostic run."""
 
     deadline = time.monotonic() + duration
-    gcs_type = mavutil.mavlink.MAV_TYPE_GCS
-    armed_flag = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
-
-    while time.monotonic() < deadline:
-        remaining = deadline - time.monotonic()
-        heartbeat = master.recv_match(
-            type="HEARTBEAT", blocking=True, timeout=min(1, remaining)
-        )
-        if heartbeat is None or getattr(heartbeat, "type", None) == gcs_type:
-            continue
-
-        mode = mavutil.mode_string_v10(heartbeat)
-        armed = bool(heartbeat.base_mode & armed_flag)
-        print(f"Heartbeat: mode={mode}, armed={armed}")
+    telemetry = Telemetry(master)
+    telemetry.start()
+    try:
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            time.sleep(min(1, remaining))
+            if telemetry.link_alive():
+                print(
+                    f"Heartbeat: mode={telemetry.get_mode()}, "
+                    f"armed={telemetry.is_armed()}"
+                )
+    finally:
+        telemetry.stop()
 
 
 if __name__ == "__main__":
